@@ -129,6 +129,13 @@ h1 {
   color: var(--text-muted);
 }
 
+.size-warning {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #e5896b;
+}
+
 .queue { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
 .queue-item {
   display: flex;

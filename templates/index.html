@@ -18,7 +18,7 @@
   </header>
 
   <h1>Send it to this machine.</h1>
-  <p class="sub">Files dropped here land directly in <code>{{ upload_dir if upload_dir else '/uploads' }}</code> on the server. No accounts, no sync delay.</p>
+  <p class="sub">Files dropped here are stored in <code>{{ upload_dir if upload_dir else 'the cloud' }}</code>, then pulled down automatically by anything polling <code>/api/files</code>.</p>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% if messages %}
@@ -39,10 +39,11 @@
         <path d="M8 41H48" stroke="currentColor" stroke-width="2.5" stroke-dasharray="1 5" stroke-linecap="round"/>
       </svg>
       <span class="dz-title">Drag files here, or click to choose</span>
-      <span class="dz-sub">Any file type · up to 500&nbsp;MB per request</span>
+      <span class="dz-sub">Any file type · up to 4&nbsp;MB per file (serverless platform limit)</span>
       <input id="file-input" type="file" name="files" multiple hidden>
     </label>
 
+    <div id="size-warning" class="size-warning" hidden></div>
     <div id="queue" class="queue"></div>
 
     <button id="send-btn" type="submit" class="send-btn" disabled>
@@ -82,11 +83,13 @@
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('file-input');
 const queue = document.getElementById('queue');
+const sizeWarning = document.getElementById('size-warning');
 const sendBtn = document.getElementById('send-btn');
 const sendLabel = document.getElementById('send-label');
 const lamp = document.getElementById('lamp');
 const form = document.getElementById('upload-form');
 
+const MAX_FILE_SIZE = 4 * 1024 * 1024; // 4 MB — matches the server's hard limit
 let selected = [];
 
 function renderQueue() {
@@ -107,8 +110,19 @@ function renderQueue() {
 }
 
 function addFiles(fileList) {
-  selected = selected.concat(Array.from(fileList));
+  const incoming = Array.from(fileList);
+  const tooBig = incoming.filter(f => f.size > MAX_FILE_SIZE);
+  const ok = incoming.filter(f => f.size <= MAX_FILE_SIZE);
+
+  selected = selected.concat(ok);
   renderQueue();
+
+  if (tooBig.length) {
+    sizeWarning.hidden = false;
+    sizeWarning.textContent = `Too large for this server (4 MB limit): ${tooBig.map(f => f.name).join(', ')}`;
+  } else {
+    sizeWarning.hidden = true;
+  }
 }
 
 fileInput.addEventListener('change', (e) => addFiles(e.target.files));

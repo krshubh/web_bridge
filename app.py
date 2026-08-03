@@ -3,35 +3,34 @@ import secrets
 from datetime import datetime
 from functools import wraps
 
+import vercel_blob
 from flask import (
     Flask, request, render_template, redirect, url_for,
-    flash, send_from_directory, jsonify
+    flash, jsonify, abort
 )
 from werkzeug.utils import secure_filename
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
-# Max total upload size per request (bytes). 500 MB by default.
-MAX_CONTENT_LENGTH = 500 * 1024 * 1024
+# Vercel Functions have a hard 4.5 MB request-body limit at the infrastructure
+# level — this cannot be raised from application code. Keep some headroom
+# below that for multipart overhead.
+MAX_CONTENT_LENGTH = 4 * 1024 * 1024  # 4 MB per request
 
 # Restrict file types if you want. None = allow anything.
 # Example: {"png", "jpg", "jpeg", "pdf", "zip", "txt"}
 ALLOWED_EXTENSIONS = None
 
 # Optional password protection (HTTP Basic Auth).
-# Set the UPLOAD_PASSWORD environment variable before starting the server
-# to require a password. Username can be anything.
+# Set the UPLOAD_PASSWORD environment variable in your Vercel project
+# settings to require a password. Username can be anything.
 UPLOAD_PASSWORD = os.environ.get("UPLOAD_PASSWORD", "")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(16))
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 def allowed_file(filename):
@@ -62,22 +61,39 @@ def human_size(num_bytes):
     return f"{num_bytes:.1f} PB"
 
 
+def format_uploaded_at(value):
+    try:
+        if isinstance(value, str):
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            dt = value
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def list_blobs():
+    """Every file currently in the Blob store, newest first."""
+    result = vercel_blob.list({"limit": "1000"})
+    blobs = result.get("blobs", [])
+    blobs.sort(key=lambda b: b.get("uploadedAt", ""), reverse=True)
+    return blobs
+
+
+def find_blob(filename):
+    return next((b for b in list_blobs() if b["pathname"] == filename), None)
+
+
 @app.route("/", methods=["GET"])
 @requires_auth
 def index():
-    entries = []
-    for name in sorted(os.listdir(UPLOAD_FOLDER)):
-        if name.startswith("."):
-            continue
-        path = os.path.join(UPLOAD_FOLDER, name)
-        if os.path.isfile(path):
-            entries.append({
-                "name": name,
-                "size": human_size(os.path.getsize(path)),
-                "mtime": datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M"),
-            })
-    entries.sort(key=lambda e: e["mtime"], reverse=True)
-    return render_template("index.html", files=entries, upload_dir=UPLOAD_FOLDER)
+    blobs = list_blobs()
+    entries = [{
+        "name": b["pathname"],
+        "size": human_size(b["size"]),
+        "mtime": format_uploaded_at(b.get("uploadedAt", "")),
+    } for b in blobs]
+    return render_template("index.html", files=entries, upload_dir="Vercel Blob storage")
 
 
 @app.route("/upload", methods=["POST"])
@@ -89,6 +105,7 @@ def upload():
 
     uploaded_files = request.files.getlist("files")
     saved, rejected = 0, []
+    existing_names = {b["pathname"] for b in list_blobs()}
 
     for file in uploaded_files:
         if not file or file.filename == "":
@@ -102,15 +119,18 @@ def upload():
             rejected.append(file.filename)
             continue
 
-        dest = os.path.join(UPLOAD_FOLDER, filename)
+        # Avoid overwriting existing blobs with the same name
         base, ext = os.path.splitext(filename)
+        candidate = filename
         counter = 1
-        while os.path.exists(dest):
-            filename = f"{base}_{counter}{ext}"
-            dest = os.path.join(UPLOAD_FOLDER, filename)
+        while candidate in existing_names:
+            candidate = f"{base}_{counter}{ext}"
             counter += 1
+        filename = candidate
 
-        file.save(dest)
+        data = file.read()
+        vercel_blob.put(filename, data, {"access": "public", "addRandomSuffix": "false"})
+        existing_names.add(filename)
         saved += 1
 
     if saved:
@@ -126,7 +146,13 @@ def upload():
 @app.route("/files/<path:filename>")
 @requires_auth
 def download(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=True)
+    # Redirect straight to Vercel's Blob CDN rather than proxying the bytes
+    # through this function — sidesteps the function response-size limit
+    # entirely, and downloads come straight off the CDN.
+    blob = find_blob(filename)
+    if not blob:
+        abort(404)
+    return redirect(blob["downloadUrl"])
 
 
 # ---------------------------------------------------------------------------
@@ -135,31 +161,26 @@ def download(filename):
 @app.route("/api/files", methods=["GET"])
 @requires_auth
 def api_list_files():
-    entries = []
-    for name in sorted(os.listdir(UPLOAD_FOLDER)):
-        if name.startswith("."):
-            continue
-        path = os.path.join(UPLOAD_FOLDER, name)
-        if os.path.isfile(path):
-            entries.append({
-                "name": name,
-                "size": os.path.getsize(path),
-                "mtime": os.path.getmtime(path),
-            })
+    entries = [{
+        "name": b["pathname"],
+        "size": b["size"],
+        "mtime": b.get("uploadedAt", ""),
+        "download_url": b["downloadUrl"],
+    } for b in list_blobs()]
     return jsonify(entries)
 
 
 @app.route("/api/files/<path:filename>", methods=["DELETE"])
 @requires_auth
 def api_delete_file(filename):
-    filename = secure_filename(filename)
-    path = os.path.join(UPLOAD_FOLDER, filename)
-    if os.path.isfile(path):
-        os.remove(path)
-        return jsonify({"deleted": filename}), 200
-    return jsonify({"error": "not found"}), 404
+    blob = find_blob(filename)
+    if not blob:
+        return jsonify({"error": "not found"}), 404
+    vercel_blob.delete([blob["url"]])
+    return jsonify({"deleted": filename}), 200
 
 
 if __name__ == "__main__":
-    # Dev server only. For real use, run with waitress or gunicorn (see README.md).
+    # Local testing only. Requires BLOB_READ_WRITE_TOKEN to be set
+    # (see README.md — "vercel env pull" or the Vercel dashboard).
     app.run(host="0.0.0.0", port=8000, debug=False)

@@ -1,106 +1,103 @@
-# Drop Point
+# Drop Point (Vercel edition)
 
-A tiny web app: open it in a browser, drag files in, they get saved straight to disk
-on whichever machine is running the server. No accounts, no cloud storage.
+A tiny web app: open it in a browser, drag files in, they get stored in
+**Vercel Blob** storage. A separate `sync_agent.py` script — run on your
+laptop — polls the app and automatically pulls new files down.
+
+```
+[someone uploads] ---> [Vercel: app.py + Blob storage] <--- polls every few sec --- [your laptop: sync_agent.py]
+```
+
+Your laptop never needs a public IP or an open port for this — the agent
+only makes outbound requests, so it works from any network.
 
 ```
 project/
-├── app.py              # Flask server
+├── app.py              # Flask app — deployed to Vercel
 ├── templates/index.html
 ├── static/style.css
 ├── requirements.txt
-└── uploads/            # files land here (created automatically)
+├── vercel.json          # function config (timeout)
+└── sync_agent.py        # runs on your laptop, not on Vercel
 ```
 
-## 1. Run it locally first
+## Why this looks different from a normal Flask app
+
+Vercel Functions are **serverless**: no persistent local disk, fresh
+container per request. So instead of saving uploads to a folder, `app.py`
+now saves them to **Vercel Blob**, Vercel's object storage product, using
+the `vercel_blob` package. Everything else — the drag-and-drop UI, the
+password gate, the `/api/files` JSON API the sync agent polls — works the
+same as before.
+
+## 1. Set up Vercel Blob storage
+
+1. Push this project to a GitHub repo and import it in the Vercel dashboard
+   (or run `vercel` from the project folder with the [Vercel CLI](https://vercel.com/docs/cli)).
+2. In the project, go to **Storage → Create Database → Blob** and connect it.
+   This automatically adds a `BLOB_READ_WRITE_TOKEN` environment variable to
+   your project — you don't set this yourself.
+3. Redeploy so the function picks up the new environment variable.
+
+## 2. Add a password
+
+In your Vercel project's **Settings → Environment Variables**, add:
+```
+UPLOAD_PASSWORD = something-only-you-know
+```
+Redeploy. The browser will now prompt for a username (anything) and that
+password before the upload page loads.
+
+## 3. Deploy
+
+```bash
+npm i -g vercel     # one-time
+vercel               # deploy a preview
+vercel --prod        # deploy to production
+```
+Vercel auto-detects `app.py` as a Flask entrypoint from `requirements.txt` —
+no other config needed beyond `vercel.json` (already included, just sets a
+30s timeout so large-ish uploads don't get cut off mid-request).
+
+## 4. Run it locally first (optional but recommended)
 
 ```bash
 pip install -r requirements.txt
+vercel env pull .env.local     # pulls BLOB_READ_WRITE_TOKEN etc. from your project
+export $(cat .env.local | xargs)  # or use python-dotenv
 python app.py
 ```
+Open `http://localhost:8000` and confirm a drag-and-drop upload shows up in
+the manifest before relying on the deployed version.
 
-Open `http://localhost:8000` — confirm you can drag a file in and see it appear
-in the manifest list and in the `uploads/` folder. Do this before worrying about
-the public internet part.
+## 5. The 4 MB file size limit — and why
 
-## 2. Run it properly (not the Flask dev server)
+Vercel Functions have a **hard 4.5 MB request/response body limit** at the
+infrastructure level — this is not a setting in `app.py`, it can't be raised
+by changing `MAX_CONTENT_LENGTH` or `vercel.json`. `app.py` caps uploads at
+4 MB to stay safely under that, and the page rejects bigger files client-side
+before they're even sent.
 
-`python app.py` uses Flask's built-in dev server, which isn't meant to sit on
-the open internet. Once local testing works, run it with **waitress** instead:
+If you need to accept larger files, the options are:
+- **Client-side direct-to-Blob upload** — the browser uploads straight to
+  Vercel Blob using a short-lived token, bypassing the function entirely.
+  This requires the JS `@vercel/blob/client` SDK on the frontend rather than
+  a plain HTML form — a bigger rework than this app currently does. Ask if
+  you'd like this built out.
+- **Go back to a VPS** instead of Vercel — a real server has no such limit.
+  (The previous version of this project, which saves straight to a VPS's
+  local disk, doesn't have this constraint — happy to hand that version back
+  over if you'd rather deploy it that way.)
 
-```bash
-waitress-serve --host=0.0.0.0 --port=8000 app:app
-```
+Downloads aren't affected by this limit: the `/files/<name>` route redirects
+straight to the file's Blob CDN URL rather than streaming bytes through the
+function, so downloads of any size work fine.
 
-(Linux/Mac alternative: `gunicorn -w 2 -b 0.0.0.0:8000 app:app`)
+## 6. Auto-download uploads to your laptop
 
-## 3. Add a password (do this before exposing it publicly)
-
-Anyone who can reach the address can upload/download once it's on the public
-internet. Set a password:
-
-```bash
-# Linux/Mac
-export UPLOAD_PASSWORD="something-only-you-know"
-waitress-serve --host=0.0.0.0 --port=8000 app:app
-
-# Windows PowerShell
-$env:UPLOAD_PASSWORD="something-only-you-know"
-waitress-serve --host=0.0.0.0 --port=8000 app:app
-```
-
-The browser will prompt for a username (anything) and that password.
-
-## 4. Make it reachable from the public internet
-
-Your laptop doesn't have a public IP by default — it's behind your home
-router's NAT. Pick one:
-
-### Option A — Cloudflare Tunnel or ngrok (easiest, no router config)
-Both give you a public HTTPS URL that forwards to your laptop, with no port
-forwarding and no exposure of your home IP. Good default choice.
-
-```bash
-# ngrok
-ngrok http 8000
-# gives you something like https://random-name.ngrok-free.app
-```
-
-`cloudflared tunnel --url http://localhost:8000` works similarly and is free.
-
-### Option B — Port forwarding on your router
-1. Set your laptop to a static local IP (in router settings or OS network settings).
-2. In your router admin panel, forward external port 443 (or any port) → your
-   laptop's local IP, port 8000.
-3. Find your public IP (search "what is my IP") or set up a free Dynamic DNS
-   hostname (No-IP, DuckDNS) if your ISP changes your IP periodically.
-4. Watch out for **CGNAT** — if your ISP doesn't give you a real public IP
-   (common on mobile/cable plans), port forwarding won't work no matter what
-   you configure. Option A sidesteps this entirely.
-
-This option exposes the port directly, so put a reverse proxy (Caddy or
-nginx) in front for HTTPS, or accept that traffic is unencrypted over plain
-HTTP.
-
-### Option C — A small cloud VM
-Spin up the cheapest instance on DigitalOcean/AWS/Linode/Hetzner — these come
-with a real public IP already. Copy the project over, run it there instead of
-your laptop. Most reliable option if this needs to stay up long-term.
-
-## 5. Auto-download uploads to your laptop
-
-If the server lives on a cloud VPS (so anyone can reach it) but you want the
-actual files to end up on your laptop automatically, run `sync_agent.py` on
-your laptop. It polls the server every few seconds, downloads anything new
-into a local `received/` folder, then deletes it from the server.
-
-```
-[someone uploads] ---> [cloud server: app.py] <--- polls every few seconds --- [your laptop: sync_agent.py]
-                                                        (outbound only, no port forwarding needed on laptop)
-```
-
-Your laptop never needs an open port or a public IP for this — the agent
-only makes outbound requests to the server, so it works from any network.
+Run `sync_agent.py` on your laptop (not on Vercel). It polls `/api/files`
+every few seconds, downloads anything new straight from Blob's CDN into a
+local `received/` folder, then deletes it from Blob storage via the API.
 
 **On your laptop:**
 ```bash
@@ -108,85 +105,35 @@ pip install requests
 ```
 Edit the top of `sync_agent.py`:
 ```python
-SERVER_URL = "http://your-server-ip-or-domain:8000"
-PASSWORD = "the same UPLOAD_PASSWORD you set on the server"
+SERVER_URL = "https://your-project.vercel.app"
+PASSWORD = "the same UPLOAD_PASSWORD you set in Vercel"
 ```
 Then run it:
 ```bash
 python sync_agent.py
 ```
-Leave it running (or set it up as a background service — Task Scheduler on
-Windows, `systemd`/`launchd` elsewhere) and any file someone uploads on the
-server shows up in `received/` on your laptop within `POLL_INTERVAL` seconds,
-by default 5.
+Leave it running (or wire it up as a background task — Task Scheduler on
+Windows, `systemd`/`launchd` elsewhere). Anything uploaded on the page shows
+up in `received/` within `POLL_INTERVAL` seconds (default 5), and is removed
+from Blob storage once safely downloaded — so your Blob storage usage stays
+near zero between syncs.
 
-By default the agent **deletes files off the server** once they're safely
-downloaded, so the cloud server never accumulates storage. Set
-`DELETE_FROM_SERVER = False` in `sync_agent.py` if you'd rather keep copies
-on both ends — it'll then track what's already synced in `.synced.json` so
-it doesn't re-download the same file forever.
-
-## 6. Deploying `app.py` to a cloud VPS
-
-Any small Ubuntu VPS works (DigitalOcean, Hetzner, AWS Lightsail, Linode —
-the cheapest tier is plenty for this).
-
-```bash
-ssh you@your-server-ip
-
-sudo apt update && sudo apt install -y python3-pip python3-venv
-mkdir drop-point && cd drop-point
-# copy app.py, templates/, static/, requirements.txt here (scp, git, etc.)
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-export UPLOAD_PASSWORD="something-only-you-know"
-waitress-serve --host=0.0.0.0 --port=8000 app:app
-```
-
-Open the port:
-```bash
-sudo ufw allow 8000/tcp
-```
-Also check your cloud provider's **security group / firewall panel** (AWS,
-DigitalOcean, etc. block ports by default at the network level too, separate
-from `ufw`).
-
-To keep it running after you disconnect, wrap it in a `systemd` service:
-
-```ini
-# /etc/systemd/system/droppoint.service
-[Unit]
-Description=Drop Point
-After=network.target
-
-[Service]
-WorkingDirectory=/home/you/drop-point
-Environment=UPLOAD_PASSWORD=something-only-you-know
-ExecStart=/home/you/drop-point/venv/bin/waitress-serve --host=0.0.0.0 --port=8000 app:app
-Restart=always
-User=you
-
-[Install]
-WantedBy=multi-user.target
-```
-```bash
-sudo systemctl enable --now droppoint
-```
-
-For HTTPS, put [Caddy](https://caddyserver.com/) in front with a domain name
-pointed at the server — it gets you a free, auto-renewing certificate with a
-two-line config.
+Set `DELETE_FROM_SERVER = False` in `sync_agent.py` if you'd rather keep
+copies in both places; it then tracks what's already synced in
+`.synced.json` so it won't re-download the same file forever.
 
 ## Notes on the app itself
 
-- **File size limit**: 500 MB per request by default — change `MAX_CONTENT_LENGTH`
-  in `app.py`.
-- **File types**: all types allowed by default. Restrict via `ALLOWED_EXTENSIONS`
-  in `app.py`, e.g. `{"png", "jpg", "pdf", "zip"}`.
-- **Filenames**: sanitized with `secure_filename`, and duplicates get a `_1`,
+- **File size limit**: 4 MB per file — see section 5 above for why, and the
+  options if you need more.
+- **File types**: all types allowed by default. Restrict via
+  `ALLOWED_EXTENSIONS` in `app.py`, e.g. `{"png", "jpg", "pdf", "zip"}`.
+- **Filenames**: sanitized with `secure_filename`; duplicates get a `_1`,
   `_2`… suffix rather than overwriting.
-- **Downloads**: every received file is listed with a download link, so the
-  same page works for pulling files back off the server too.
+- **Access model**: blobs are uploaded with `access: "public"`, meaning
+  anyone with the exact (randomly-pathed) blob URL can fetch it directly,
+  bypassing the app's password. The password still gates the upload page and
+  the `/api/files` listing/delete endpoints — it's the same "unlisted but not
+  truly private" tradeoff as most simple file-drop tools. For stronger
+  guarantees, Vercel's **Private Blob** requires authenticated reads through
+  a Vercel Function — a further change if you want it.

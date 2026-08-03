@@ -4,6 +4,7 @@ from datetime import datetime
 from functools import wraps
 
 import vercel_blob
+
 from flask import (
     Flask, request, render_template, redirect, url_for,
     flash, jsonify, abort
@@ -152,7 +153,7 @@ def download(filename):
     blob = find_blob(filename)
     if not blob:
         abort(404)
-    return redirect(blob["downloadUrl"])
+    return redirect(blob["url"])
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +166,7 @@ def api_list_files():
         "name": b["pathname"],
         "size": b["size"],
         "mtime": b.get("uploadedAt", ""),
-        "download_url": b["downloadUrl"],
+        "download_url": b["url"],
     } for b in list_blobs()]
     return jsonify(entries)
 

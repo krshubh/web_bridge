@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drop Point</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="eyebrow">
+    <span class="lamp" id="lamp"></span>
+    <span>DROP POINT — LOCAL RECEIVER</span>
+  </header>
+
+  <h1>Send it to this machine.</h1>
+  <p class="sub">Files dropped here land directly in <code>{{ upload_dir if upload_dir else '/uploads' }}</code> on the server. No accounts, no sync delay.</p>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <form id="upload-form" action="/upload" method="post" enctype="multipart/form-data">
+    <label id="dropzone" for="file-input" class="dropzone">
+      <svg class="chute" width="56" height="56" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M10 22L28 8L46 22" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 8V34" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+        <rect x="8" y="34" width="40" height="14" rx="2" stroke="currentColor" stroke-width="2.5"/>
+        <path d="M8 41H48" stroke="currentColor" stroke-width="2.5" stroke-dasharray="1 5" stroke-linecap="round"/>
+      </svg>
+      <span class="dz-title">Drag files here, or click to choose</span>
+      <span class="dz-sub">Any file type · up to 500&nbsp;MB per request</span>
+      <input id="file-input" type="file" name="files" multiple hidden>
+    </label>
+
+    <div id="queue" class="queue"></div>
+
+    <button id="send-btn" type="submit" class="send-btn" disabled>
+      <span id="send-label">Select files to send</span>
+    </button>
+  </form>
+
+  <section class="manifest">
+    <div class="manifest-head">
+      <span>Manifest</span>
+      <span class="manifest-count">{{ files|length }} received</span>
+    </div>
+    {% if files %}
+    <table>
+      <thead>
+        <tr><th>File</th><th>Size</th><th>Received</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for f in files %}
+        <tr>
+          <td class="fname">{{ f.name }}</td>
+          <td>{{ f.size }}</td>
+          <td>{{ f.mtime }}</td>
+          <td><a href="{{ url_for('download', filename=f.name) }}" class="dl">↓</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">Nothing here yet. Whatever lands in the chute above shows up in this log.</p>
+    {% endif %}
+  </section>
+
+</div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+const queue = document.getElementById('queue');
+const sendBtn = document.getElementById('send-btn');
+const sendLabel = document.getElementById('send-label');
+const lamp = document.getElementById('lamp');
+const form = document.getElementById('upload-form');
+
+let selected = [];
+
+function renderQueue() {
+  queue.innerHTML = '';
+  selected.forEach((file, i) => {
+    const row = document.createElement('div');
+    row.className = 'queue-item';
+    row.innerHTML = `<span class="qi-name">${file.name}</span><span class="qi-size">${(file.size/1024).toFixed(0)} KB</span>`;
+    queue.appendChild(row);
+  });
+  if (selected.length > 0) {
+    sendBtn.disabled = false;
+    sendLabel.textContent = `Send ${selected.length} file${selected.length > 1 ? 's' : ''}`;
+  } else {
+    sendBtn.disabled = true;
+    sendLabel.textContent = 'Select files to send';
+  }
+}
+
+function addFiles(fileList) {
+  selected = selected.concat(Array.from(fileList));
+  renderQueue();
+}
+
+fileInput.addEventListener('change', (e) => addFiles(e.target.files));
+
+['dragenter', 'dragover'].forEach(evt => {
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.add('active');
+    lamp.classList.add('lamp-active');
+  });
+});
+
+['dragleave', 'drop'].forEach(evt => {
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('active');
+    lamp.classList.remove('lamp-active');
+  });
+});
+
+dropzone.addEventListener('drop', (e) => {
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+});
+
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (selected.length === 0) return;
+
+  const data = new FormData();
+  selected.forEach(f => data.append('files', f));
+
+  sendBtn.disabled = true;
+  sendLabel.textContent = 'Sending…';
+  lamp.classList.add('lamp-active');
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/upload');
+  xhr.upload.onprogress = (evt) => {
+    if (evt.lengthComputable) {
+      const pct = Math.round((evt.loaded / evt.total) * 100);
+      sendLabel.textContent = `Sending… ${pct}%`;
+    }
+  };
+  xhr.onload = () => { window.location.href = '/'; };
+  xhr.onerror = () => {
+    sendLabel.textContent = 'Failed — try again';
+    lamp.classList.remove('lamp-active');
+  };
+  xhr.send(data);
+});
+</script>
+
+</body>
+</html>
